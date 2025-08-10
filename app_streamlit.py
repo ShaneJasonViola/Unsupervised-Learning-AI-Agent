@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from datetime import datetime
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, AgglomerativeClustering
@@ -36,7 +35,6 @@ def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["InvoiceDate"])
     if "Amount" not in df.columns:
         df["Amount"] = df["Quantity"] * df["UnitPrice"]
-    # basic cleaning
     df = df[df["Quantity"] > 0]
     df = df[df["UnitPrice"] > 0]
     return df
@@ -57,7 +55,6 @@ def build_rfm_extras(df: pd.DataFrame) -> pd.DataFrame:
     }).reset_index()
     rfm.columns = ["CustomerID", "Recency", "Frequency", "Monetary"]
 
-    # extras
     rfm = (
         rfm.merge(df.groupby("CustomerID")["Amount"].mean().reset_index(name="AvgOrderValue"), on="CustomerID")
            .merge(df.groupby("CustomerID")["ProductID"].nunique().reset_index(name="ProductDiversity"), on="CustomerID")
@@ -82,7 +79,6 @@ def scale_and_filter(rfm: pd.DataFrame):
     X.replace([np.inf, -np.inf], np.nan, inplace=True)
     X = X.fillna(X.median(numeric_only=True))
 
-    # IQR outlier filter
     Q1, Q3 = X.quantile(0.25), X.quantile(0.75)
     IQR = Q3 - Q1
     lower, upper = Q1 - 1.5*IQR, Q3 + 1.5*IQR
@@ -100,13 +96,12 @@ def fit_kmeans_alt(X_scaled, rfm_clean, k=5, seed=42):
     rfm_k = rfm_clean.copy()
     rfm_k["Cluster"] = clusters
 
-    # Alt methods
-    agg = AgglomerativeClustering(n_clusters=k, linkage="ward", metric="euclidean")
+    # Note: with linkage='ward' the distance is Euclidean; do not pass 'metric'
+    agg = AgglomerativeClustering(n_clusters=k, linkage="ward")
     agg_labels = agg.fit_predict(X_scaled)
     gmm = GaussianMixture(n_components=k, covariance_type="full", random_state=seed)
     gmm_labels = gmm.fit_predict(X_scaled)
 
-    # metrics
     s_km = silhouette_score(X_scaled, clusters)
     s_agg = silhouette_score(X_scaled, agg_labels)
     s_gmm = silhouette_score(X_scaled, gmm_labels)
@@ -124,7 +119,6 @@ def fit_kmeans_alt(X_scaled, rfm_clean, k=5, seed=42):
     }
     return kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics
 
-# Market Basket pieces
 def build_boolean_basket(df_in: pd.DataFrame, product_col: str):
     sub = df_in.loc[:, ["InvoiceNo", product_col, "Quantity"]].copy()
     sub = sub.dropna(subset=["InvoiceNo", product_col, "Quantity"])
@@ -220,7 +214,7 @@ def build_roi_table(rules_df, df, product_col, eligible=10_000, margin=0.35, cos
         })
     return pd.DataFrame(rows)
 
-# ------------------------------ Sidebar --------------------------------------
+# ------------------------------ Load data & sidebar ---------------------------
 st.sidebar.title("CIS 9660 • Data Mining • Project #2")
 
 DEFAULT_CSV = "synthetic_retail_transactions.csv"
@@ -229,16 +223,14 @@ if not os.path.exists(DEFAULT_CSV):
     st.stop()
 df = load_data(DEFAULT_CSV)
 
-# Product column as a DROPDOWN (no upload UI)
-candidate_cols = [c for c in ["ProductName","Description","ProductID"] if c in df.columns]
-default_prod_col = first_product_col(df)
-product_col = st.sidebar.selectbox("Product column", options=candidate_cols, index=candidate_cols.index(default_prod_col))
+# auto-detect product column (no UI)
+product_col = first_product_col(df)
 
+# keep only K + rule/ROI controls in sidebar
 k_value = st.sidebar.slider("K for clustering", 2, 10, 5, 1)
-seed = st.sidebar.number_input("Random seed", value=42, step=1)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Rules thresholds**")
+st.sidebar.markdown("Rules thresholds")
 min_support = st.sidebar.slider("Min support", 0.01, 0.10, 0.02, 0.01)
 min_conf    = st.sidebar.slider("Min confidence", 0.10, 0.90, 0.30, 0.05)
 min_lift    = st.sidebar.slider("Min lift", 1.0, 3.0, 1.10, 0.05)
@@ -251,15 +243,16 @@ cost     = st.sidebar.number_input("Campaign cost ($)", value=1500.0, step=100.0
 # --------------------------- Compute RFM & Clusters ---------------------------
 rfm = build_rfm_extras(df)
 X_clean, rfm_clean, scaler, X_scaled = scale_and_filter(rfm)
-kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics = fit_kmeans_alt(X_scaled, rfm_clean, k=k_value, seed=seed)
+SEED = 42  # fixed internally
+kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics = fit_kmeans_alt(X_scaled, rfm_clean, k=k_value, seed=SEED)
 
-# PCA once for visualizations
+# PCA for visualizations
 pca = PCA(n_components=3).fit(X_scaled)
 X_pca = pca.transform(X_scaled)
 exp_var = pca.explained_variance_ratio_
 
 # ------------------------------- Tabs ----------------------------------------
-tab1, tab2, tab3 = st.tabs(["🧭 Customer Segmentation", "🛒 Market Basket Analysis", "📈 BI Summary & ROI"])
+tab1, tab2, tab3 = st.tabs(["Customer Segmentation", "Market Basket Analysis", "BI Summary & ROI"])
 
 # ================================ TAB 1 ======================================
 with tab1:
@@ -267,63 +260,60 @@ with tab1:
 
     colA, colB = st.columns([3,2])
     with colA:
-        st.markdown("**2D PCA Scatter**")
+        st.markdown("2D PCA Scatter")
         df_plot = pd.DataFrame({
             "PC1": X_pca[:,0], "PC2": X_pca[:,1],
             "Cluster": clusters.astype(int), "CustomerID": rfm_clean["CustomerID"].values
         })
         fig2d = px.scatter(df_plot, x="PC1", y="PC2", color="Cluster",
                            hover_data=["CustomerID"],
-                           title=f"2D PCA (var={exp_var[0]+exp_var[1]:.1%})")
+                           title=f"2D PCA (variance explained={exp_var[0]+exp_var[1]:.1%})")
         st.plotly_chart(fig2d, use_container_width=True)
 
-        st.markdown("**3D PCA Scatter**")
+        st.markdown("3D PCA Scatter")
         df_plot3 = pd.DataFrame({
             "PC1": X_pca[:,0], "PC2": X_pca[:,1], "PC3": X_pca[:,2] if X_pca.shape[1] > 2 else X_pca[:,1]*0,
             "Cluster": clusters.astype(int), "CustomerID": rfm_clean["CustomerID"].values
         })
         fig3d = px.scatter_3d(df_plot3, x="PC1", y="PC2", z="PC3", color="Cluster",
                               hover_data=["CustomerID"],
-                              title=f"3D PCA (var={exp_var[:3].sum():.1%})")
+                              title=f"3D PCA (variance explained={exp_var[:3].sum():.1%})")
         st.plotly_chart(fig3d, use_container_width=True)
 
     with colB:
-        st.markdown("**Segment Statistics**")
+        st.markdown("Segment Statistics")
         sizes = rfm_k["Cluster"].value_counts().sort_index()
         aov = rfm_k.groupby("Cluster")["AvgOrderValue"].mean().round(2)
         mon = rfm_k.groupby("Cluster")["Monetary"].mean().round(2)
         stats_df = pd.DataFrame({"Customers": sizes, "AvgOrderValue": aov, "AvgMonetary": mon})
         st.dataframe(stats_df)
 
-        st.markdown("**Validation snapshots**")
-        st.write(f"Silhouette — KM: **{metrics['silhouette']['KMeans']:.3f}**, AGG: {metrics['silhouette']['Agglomerative']:.3f}, GMM: {metrics['silhouette']['GMM']:.3f}")
-        st.write(f"Calinski-Harabasz (KM): **{metrics['calinski_harabasz']:.1f}**")
-        st.write(f"Davies-Bouldin (KM): **{metrics['davies_bouldin']:.3f}**")
+        st.markdown("Validation snapshots")
+        st.write(f"Silhouette — KMeans: {metrics['silhouette']['KMeans']:.3f}, "
+                 f"Agglomerative: {metrics['silhouette']['Agglomerative']:.3f}, "
+                 f"GMM: {metrics['silhouette']['GMM']:.3f}")
+        st.write(f"Calinski-Harabasz (KMeans): {metrics['calinski_harabasz']:.1f}")
+        st.write(f"Davies-Bouldin (KMeans): {metrics['davies_bouldin']:.3f}")
 
     st.markdown("---")
-    st.markdown("**Segment Comparison (cluster means)**")
+    st.markdown("Segment Comparison (cluster means)")
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
     st.dataframe(cluster_profiles)
 
-    # ---------------------- Customer Lookup Tool ----------------------
+    # Customer Lookup Tool
     st.markdown("---")
-    st.markdown("### 🔎 Customer Lookup")
-    st.caption("Enter a CustomerID or pick from the dropdown to see the segment assignment and their key metrics.")
+    st.markdown("Customer Lookup")
+    st.caption("Enter a CustomerID or pick from the dropdown to see the segment assignment and key metrics.")
 
-    # Build a dropdown list for convenience (stringified to cover mixed types)
     id_options = sorted(list(map(str, rfm_k["CustomerID"].unique())))
     col1, col2 = st.columns([2,1])
-
     with col1:
         lookup_text = st.text_input("Type CustomerID", placeholder="e.g., 12345")
     with col2:
-        lookup_select = st.selectbox("...or select", options=[""] + id_options, index=0)
+        lookup_select = st.selectbox("Or select", options=[""] + id_options, index=0)
 
-    # Resolve the input (text wins if provided)
-    chosen_id_raw = lookup_text.strip() if lookup_text.strip() else lookup_select.strip()
+    chosen_id_raw = (lookup_text or "").strip() or (lookup_select or "").strip()
     if chosen_id_raw:
-        # match either numeric or string CustomerID
-        # try numeric match first
         try:
             chosen_num = pd.to_numeric(chosen_id_raw)
             row = rfm_k.loc[rfm_k["CustomerID"] == chosen_num]
@@ -334,7 +324,7 @@ with tab1:
             st.warning("CustomerID not found in the filtered dataset.")
         else:
             cl = int(row["Cluster"].iloc[0])
-            st.success(f"Customer **{chosen_id_raw}** is in **Cluster {cl}**.")
+            st.success(f"Customer {chosen_id_raw} is in Cluster {cl}.")
             st.write(row[["Recency","Frequency","Monetary","AvgOrderValue","ProductDiversity",
                           "TotalQuantity","AvgQuantityPerTransaction","CategoryDiversity",
                           "PurchaseSpan","AvgDaysBetweenPurchases"]])
@@ -346,7 +336,7 @@ with tab2:
     basket_bool, PRODUCT_COL = build_boolean_basket(df, product_col)
     rules_all, itemsets = mine_rules(basket_bool, min_support=min_support, min_conf=min_conf)
 
-    st.markdown("**Rule Filters**")
+    st.markdown("Rule Filters")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         min_sup_ui = st.number_input("Min support", value=min_support, step=0.01, min_value=0.0)
@@ -371,7 +361,7 @@ with tab2:
     st.caption(f"{len(rules_view)} rules after filtering.")
     st.dataframe(rules_view[["antecedents","consequents","support","confidence","lift","leverage","conviction"]].head(200))
 
-    st.markdown("**Product Recommender**")
+    st.markdown("Product Recommender")
     selected = st.multiselect("Enter products currently in basket", options=all_products[:1000], default=[])
     if st.button("Recommend"):
         recs = recommend_from_rules(selected, rules_view if not rules_view.empty else rules_all, top_n=10)
@@ -381,7 +371,7 @@ with tab2:
             st.dataframe(recs)
 
     st.markdown("---")
-    st.markdown("**Visuals**")
+    st.markdown("Visuals")
     if not rules_view.empty:
         r = rules_view.copy().head(500)
         fig_sc = px.scatter(r, x="support", y="confidence", size="lift", hover_data=["antecedents","consequents"],
@@ -393,13 +383,13 @@ with tab2:
     cA, cB = st.columns(2)
     with cA:
         if not rules_view.empty and HAS_NX:
-            st.markdown("**Network (top by lift)**")
+            st.markdown("Network (top by lift)")
             draw_rules_network_matplotlib(rules_view, top_n=20)
         else:
-            st.info("Install `networkx` for the network plot or relax filters to get rules.")
+            st.info("Install networkx for the network plot or relax filters to get rules.")
     with cB:
         if not rules_view.empty:
-            st.markdown("**Parallel Coordinates (metrics)**")
+            st.markdown("Parallel Coordinates (metrics)")
             r = rules_view.sort_values("lift", ascending=False).head(25).copy()
             for c in ["support","confidence","lift","leverage","conviction"]:
                 if c in r.columns:
@@ -423,22 +413,23 @@ with tab3:
     aov = rfm_k.groupby("Cluster")["AvgOrderValue"].mean().round(2)
     mon = rfm_k.groupby("Cluster")["Monetary"].mean().round(2)
 
-    st.markdown("**Executive Summary (auto-filled)**")
-    st.write(f"- Chosen K: **{k_value}** (K-Means primary).")
-    st.write(f"- Silhouette (K-Means): **{metrics['silhouette']['KMeans']:.3f}**; "
-             f"ARI (KM vs AGG): **{metrics['ari']['KM_vs_AGG']:.3f}**, KM vs GMM: **{metrics['ari']['KM_vs_GMM']:.3f}**.")
+    st.markdown("Executive Summary")
+    st.write(f"- Chosen K: {k_value} (K-Means primary).")
+    st.write(f"- Silhouette (K-Means): {metrics['silhouette']['KMeans']:.3f}; "
+             f"Adjusted Rand Index (KM vs Agglomerative): {metrics['ari']['KM_vs_AGG']:.3f}; "
+             f"(KM vs GMM): {metrics['ari']['KM_vs_GMM']:.3f}.")
     st.write("- Cluster sizes and value metrics below.")
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Customer count by cluster**")
+        st.markdown("Customer count by cluster")
         st.bar_chart(sizes)
     with col2:
-        st.markdown("**Average spend per customer by cluster ($)**")
+        st.markdown("Average spend per customer by cluster ($)")
         st.bar_chart(mon)
 
     st.markdown("---")
-    st.markdown("**Top Rules (by lift)**")
+    st.markdown("Top Rules (by lift)")
     rules_for_bi = rules_view if 'rules_view' in locals() and not rules_view.empty else rules_all
     top_rules = rules_for_bi.sort_values(["lift","confidence"], ascending=False).head(10).copy()
     if not top_rules.empty:
@@ -447,7 +438,7 @@ with tab3:
     else:
         st.info("No rules to display.")
 
-    st.markdown("**ROI Projections**")
+    st.markdown("ROI Projections")
     roi_table = build_roi_table(rules_for_bi, df, product_col, eligible=eligible, margin=margin, cost=cost, top_n=10)
     if roi_table.empty:
         st.info("No ROI rows (no rules).")
@@ -463,14 +454,13 @@ with tab3:
             st.plotly_chart(fig_roi, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("**Actionable Recommendations (quick hits)**")
+    st.markdown("Actionable Recommendations")
     st.write("""
-- **Loyal Frequent Shoppers**: early access, limited-time drops, tiered perks; avoid heavy discounts.
-- **Bulk High-Spend Buyers**: volume pricing, subscribe-and-save, replenishment reminders, cart bundles.
-- **Steady Long-Term Buyers**: milestone coupons, buy-again widgets, free-shipping nudges.
-- **Variety Seekers (Lapsed)**: win-back with new arrivals & sampler bundles; time-boxed incentives.
-- **One-Off Low-Spend Buyers**: lightweight re-engagement; limit spend if no response after two touches.
-- **Cross-sell placement**: PDP + cart add-ons using **lift ≥ 1.5** rules; lift 1.2–1.5 for email only.
+- Loyal Frequent Shoppers: early access, limited-time drops, tiered perks; avoid heavy discounts.
+- Bulk High-Spend Buyers: volume pricing, subscribe-and-save, replenishment reminders, cart bundles.
+- Steady Long-Term Buyers: milestone coupons, buy-again widgets, free-shipping nudges.
+- Variety Seekers (Lapsed): win-back with new arrivals and sampler bundles; time-boxed incentives.
+- One-Off Low-Spend Buyers: lightweight re-engagement; limit spend if no response after two touches.
+- Cross-sell placement: PDP and cart add-ons using lift ≥ 1.5 rules; lift 1.2–1.5 for email only.
 """)
-
 
