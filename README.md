@@ -6,7 +6,7 @@ This repo contains two pieces:
 1) **analysis_pipeline.py** — a notebook‑friendly script that builds customer segments (RFM + extras), compares clustering methods, mines association rules with Apriori, and outputs clear visuals plus an ROI table.
 2) **app_streamlit.py** — an interactive Streamlit app that lets you explore the segments, play with market‑basket rules, and view a business summary with recommendations and ROI.
 
-If you’re skimming: install the requirements, put your CSV next to these files (or keep the synthetic sample), run the analysis once, then launch Streamlit.
+Summary: install the requirements, put your CSV next to these files (or keep the synthetic sample), run the analysis once, then launch Streamlit.
 
 ---
 
@@ -190,12 +190,6 @@ Deployment (Streamlit Community Cloud)
 
 ---
 
-License & Credits
------------------
-
-Use this freely for coursework and internal demos. If you build on it for another project, a small attribution is appreciated.
-
-Questions or stuck? Open an issue and paste any error messages — I’ll help you debug.
 
 
 
