@@ -1,14 +1,14 @@
 # app_streamlit.py
 # Streamlit App: Customer Segmentation + Market Basket + BI Summary (ROI)
-# ----------------------------------------------------------------------
-# Usage:
-#   streamlit run app_streamlit.py
+# Usage: streamlit run app_streamlit.py
 
 import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+from datetime import datetime
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, AgglomerativeClustering
@@ -30,22 +30,18 @@ st.set_page_config(page_title="Retail Analytics: Segmentation & Market Basket",
                    layout="wide")
 
 # ------------------------------- Helpers --------------------------------------
-@st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["InvoiceDate"])
     if "Amount" not in df.columns:
         df["Amount"] = df["Quantity"] * df["UnitPrice"]
+    # basic cleaning
     df = df[df["Quantity"] > 0]
     df = df[df["UnitPrice"] > 0]
     return df
 
-def first_product_col(df: pd.DataFrame):
-    for c in ["ProductName", "Description", "ProductID"]:
-        if c in df.columns:
-            return c
-    raise ValueError("Add one of these columns to your CSV: ProductName, Description, or ProductID.")
+def detect_product_columns(df: pd.DataFrame):
+    return [c for c in ["ProductName", "Description", "ProductID"] if c in df.columns]
 
-@st.cache_data(show_spinner=False)
 def build_rfm_extras(df: pd.DataFrame) -> pd.DataFrame:
     current_date = df["InvoiceDate"].max() + pd.Timedelta(days=1)
     rfm = df.groupby("CustomerID").agg({
@@ -55,6 +51,7 @@ def build_rfm_extras(df: pd.DataFrame) -> pd.DataFrame:
     }).reset_index()
     rfm.columns = ["CustomerID", "Recency", "Frequency", "Monetary"]
 
+    # extras
     rfm = (
         rfm.merge(df.groupby("CustomerID")["Amount"].mean().reset_index(name="AvgOrderValue"), on="CustomerID")
            .merge(df.groupby("CustomerID")["ProductID"].nunique().reset_index(name="ProductDiversity"), on="CustomerID")
@@ -73,12 +70,12 @@ CLUSTER_FEATURES = [
     "PurchaseSpan","AvgDaysBetweenPurchases"
 ]
 
-@st.cache_data(show_spinner=False)
 def scale_and_filter(rfm: pd.DataFrame):
     X = rfm[CLUSTER_FEATURES].copy()
     X.replace([np.inf, -np.inf], np.nan, inplace=True)
     X = X.fillna(X.median(numeric_only=True))
 
+    # IQR outlier filter
     Q1, Q3 = X.quantile(0.25), X.quantile(0.75)
     IQR = Q3 - Q1
     lower, upper = Q1 - 1.5*IQR, Q3 + 1.5*IQR
@@ -96,12 +93,13 @@ def fit_kmeans_alt(X_scaled, rfm_clean, k=5, seed=42):
     rfm_k = rfm_clean.copy()
     rfm_k["Cluster"] = clusters
 
-    # Note: with linkage='ward' the distance is Euclidean; do not pass 'metric'
-    agg = AgglomerativeClustering(n_clusters=k, linkage="ward")
+    # Alt methods
+    agg = AgglomerativeClustering(n_clusters=k, linkage="ward", metric="euclidean")
     agg_labels = agg.fit_predict(X_scaled)
     gmm = GaussianMixture(n_components=k, covariance_type="full", random_state=seed)
     gmm_labels = gmm.fit_predict(X_scaled)
 
+    # metrics
     s_km = silhouette_score(X_scaled, clusters)
     s_agg = silhouette_score(X_scaled, agg_labels)
     s_gmm = silhouette_score(X_scaled, gmm_labels)
@@ -119,6 +117,7 @@ def fit_kmeans_alt(X_scaled, rfm_clean, k=5, seed=42):
     }
     return kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics
 
+# Market Basket pieces
 def build_boolean_basket(df_in: pd.DataFrame, product_col: str):
     sub = df_in.loc[:, ["InvoiceNo", product_col, "Quantity"]].copy()
     sub = sub.dropna(subset=["InvoiceNo", product_col, "Quantity"])
@@ -131,6 +130,7 @@ def build_boolean_basket(df_in: pd.DataFrame, product_col: str):
 def mine_rules(basket_bool: pd.DataFrame, min_support=0.02, min_conf=0.30):
     itemsets = apriori(basket_bool, min_support=min_support, use_colnames=True)
     rules = association_rules(itemsets, metric="confidence", min_threshold=min_conf)
+    # keep support filter
     rules = rules.query("support >= @min_support").copy()
     rules["antecedents"] = rules["antecedents"].apply(lambda s: list(s))
     rules["consequents"] = rules["consequents"].apply(lambda s: list(s))
@@ -214,23 +214,27 @@ def build_roi_table(rules_df, df, product_col, eligible=10_000, margin=0.35, cos
         })
     return pd.DataFrame(rows)
 
-# ------------------------------ Load data & sidebar ---------------------------
+# ------------------------------ Sidebar --------------------------------------
 st.sidebar.title("CIS 9660 • Data Mining • Project #2")
 
-DEFAULT_CSV = "synthetic_retail_transactions.csv"
-if not os.path.exists(DEFAULT_CSV):
-    st.error(f"CSV not found: {DEFAULT_CSV}")
+# Fixed CSV path; no upload UI
+default_csv = "synthetic_retail_transactions.csv"
+if not os.path.exists(default_csv):
+    st.sidebar.error(f"CSV not found at {default_csv}.")
     st.stop()
-df = load_data(DEFAULT_CSV)
 
-# auto-detect product column (no UI)
-product_col = first_product_col(df)
+# Load once to populate sidebar controls
+_df_preview = load_data(default_csv)
+product_options = detect_product_columns(_df_preview)
+if not product_options:
+    st.sidebar.error("No product column found. Add one of: ProductName, Description, ProductID")
+    st.stop()
+product_col = st.sidebar.selectbox("Product column", options=product_options, index=0)
 
-# keep only K + rule/ROI controls in sidebar
 k_value = st.sidebar.slider("K for clustering", 2, 10, 5, 1)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("Rules thresholds")
+st.sidebar.markdown("Association rule thresholds")
 min_support = st.sidebar.slider("Min support", 0.01, 0.10, 0.02, 0.01)
 min_conf    = st.sidebar.slider("Min confidence", 0.10, 0.90, 0.30, 0.05)
 min_lift    = st.sidebar.slider("Min lift", 1.0, 3.0, 1.10, 0.05)
@@ -240,19 +244,23 @@ eligible = st.sidebar.number_input("Eligible baskets (ROI)", value=10_000, step=
 margin   = st.sidebar.number_input("Gross margin (0-1)", value=0.35, step=0.05, min_value=0.0, max_value=1.0)
 cost     = st.sidebar.number_input("Campaign cost ($)", value=1500.0, step=100.0)
 
+# ------------------------------ Load data ------------------------------------
+df = _df_preview.copy()  # already cleaned by load_data
+
 # --------------------------- Compute RFM & Clusters ---------------------------
 rfm = build_rfm_extras(df)
 X_clean, rfm_clean, scaler, X_scaled = scale_and_filter(rfm)
-SEED = 42  # fixed internally
-kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics = fit_kmeans_alt(X_scaled, rfm_clean, k=k_value, seed=SEED)
+kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics = fit_kmeans_alt(
+    X_scaled, rfm_clean, k=k_value, seed=42
+)
 
-# PCA for visualizations
+# PCA once for visualizations
 pca = PCA(n_components=3).fit(X_scaled)
 X_pca = pca.transform(X_scaled)
 exp_var = pca.explained_variance_ratio_
 
 # ------------------------------- Tabs ----------------------------------------
-tab1, tab2, tab3 = st.tabs(["Customer Segmentation", "Market Basket Analysis", "BI Summary & ROI"])
+tab1, tab2, tab3 = st.tabs(["Customer Segmentation", "Market Basket Analysis", "BI Summary and ROI"])
 
 # ================================ TAB 1 ======================================
 with tab1:
@@ -267,7 +275,7 @@ with tab1:
         })
         fig2d = px.scatter(df_plot, x="PC1", y="PC2", color="Cluster",
                            hover_data=["CustomerID"],
-                           title=f"2D PCA (variance explained={exp_var[0]+exp_var[1]:.1%})")
+                           title=f"2D PCA (var={exp_var[0]+exp_var[1]:.1%})")
         st.plotly_chart(fig2d, use_container_width=True)
 
         st.markdown("3D PCA Scatter")
@@ -277,7 +285,7 @@ with tab1:
         })
         fig3d = px.scatter_3d(df_plot3, x="PC1", y="PC2", z="PC3", color="Cluster",
                               hover_data=["CustomerID"],
-                              title=f"3D PCA (variance explained={exp_var[:3].sum():.1%})")
+                              title=f"3D PCA (var={exp_var[:3].sum():.1%})")
         st.plotly_chart(fig3d, use_container_width=True)
 
     with colB:
@@ -289,42 +297,29 @@ with tab1:
         st.dataframe(stats_df)
 
         st.markdown("Validation snapshots")
-        st.write(f"Silhouette — KMeans: {metrics['silhouette']['KMeans']:.3f}, "
-                 f"Agglomerative: {metrics['silhouette']['Agglomerative']:.3f}, "
-                 f"GMM: {metrics['silhouette']['GMM']:.3f}")
-        st.write(f"Calinski-Harabasz (KMeans): {metrics['calinski_harabasz']:.1f}")
-        st.write(f"Davies-Bouldin (KMeans): {metrics['davies_bouldin']:.3f}")
+        st.write(f"Silhouette — KM: {metrics['silhouette']['KMeans']:.3f}, AGG: {metrics['silhouette']['Agglomerative']:.3f}, GMM: {metrics['silhouette']['GMM']:.3f}")
+        st.write(f"Calinski-Harabasz (KM): {metrics['calinski_harabasz']:.1f}")
+        st.write(f"Davies-Bouldin (KM): {metrics['davies_bouldin']:.3f}")
+        st.write(f"ARI — KM vs AGG: {metrics['ari']['KM_vs_AGG']:.3f}, KM vs GMM: {metrics['ari']['KM_vs_GMM']:.3f}")
 
     st.markdown("---")
     st.markdown("Segment Comparison (cluster means)")
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
     st.dataframe(cluster_profiles)
 
-    # Customer Lookup Tool
-    st.markdown("---")
     st.markdown("Customer Lookup")
-    st.caption("Enter a CustomerID or pick from the dropdown to see the segment assignment and key metrics.")
-
-    id_options = sorted(list(map(str, rfm_k["CustomerID"].unique())))
-    col1, col2 = st.columns([2,1])
-    with col1:
-        lookup_text = st.text_input("Type CustomerID", placeholder="e.g., 12345")
-    with col2:
-        lookup_select = st.selectbox("Or select", options=[""] + id_options, index=0)
-
-    chosen_id_raw = (lookup_text or "").strip() or (lookup_select or "").strip()
-    if chosen_id_raw:
+    lookup_id = st.text_input("Enter CustomerID")
+    if lookup_id:
         try:
-            chosen_num = pd.to_numeric(chosen_id_raw)
-            row = rfm_k.loc[rfm_k["CustomerID"] == chosen_num]
-        except Exception:
-            row = rfm_k.loc[rfm_k["CustomerID"].astype(str) == chosen_id_raw]
-
+            cid = int(lookup_id)
+        except:
+            cid = lookup_id
+        row = rfm_k.loc[rfm_k["CustomerID"] == cid]
         if row.empty:
-            st.warning("CustomerID not found in the filtered dataset.")
+            st.warning("CustomerID not found in the filtered set.")
         else:
             cl = int(row["Cluster"].iloc[0])
-            st.success(f"Customer {chosen_id_raw} is in Cluster {cl}.")
+            st.success(f"Customer {cid} is in Cluster {cl}.")
             st.write(row[["Recency","Frequency","Monetary","AvgOrderValue","ProductDiversity",
                           "TotalQuantity","AvgQuantityPerTransaction","CategoryDiversity",
                           "PurchaseSpan","AvgDaysBetweenPurchases"]])
@@ -333,77 +328,139 @@ with tab1:
 with tab2:
     st.subheader("Market Basket Analysis")
 
+    # Build rules for this tab
     basket_bool, PRODUCT_COL = build_boolean_basket(df, product_col)
     rules_all, itemsets = mine_rules(basket_bool, min_support=min_support, min_conf=min_conf)
-
-    st.markdown("Rule Filters")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        min_sup_ui = st.number_input("Min support", value=min_support, step=0.01, min_value=0.0)
-    with c2:
-        min_conf_ui = st.number_input("Min confidence", value=min_conf, step=0.05, min_value=0.0, max_value=1.0)
-    with c3:
-        min_lift_ui = st.number_input("Min lift", value=min_lift, step=0.05, min_value=1.0)
-    with c4:
-        max_ant = st.number_input("Max antecedent size", value=3, step=1, min_value=1)
-
     all_products = list(basket_bool.columns)
-    include_items = st.multiselect("Must include in antecedent", options=all_products, default=[])
-    exclude_items = st.multiselect("Exclude anywhere in rule", options=all_products, default=[])
 
-    rules_view = filter_rules(
-        rules_all,
-        include=include_items or None,
-        exclude=exclude_items or None,
-        min_support=min_sup_ui, min_conf=min_conf_ui, min_lift=min_lift_ui,
-        max_antecedent_len=max_ant
+    # ---------- Quick recommendations (simple UI) ----------
+    st.markdown("Quick recommendations")
+    picked = st.multiselect(
+        "Pick one or more items in the shopper’s basket",
+        options=all_products, default=[]
     )
-    st.caption(f"{len(rules_view)} rules after filtering.")
-    st.dataframe(rules_view[["antecedents","consequents","support","confidence","lift","leverage","conviction"]].head(200))
+    n_suggest = st.slider("How many suggestions to show", 1, 15, 10)
 
-    st.markdown("Product Recommender")
-    selected = st.multiselect("Enter products currently in basket", options=all_products[:1000], default=[])
-    if st.button("Recommend"):
-        recs = recommend_from_rules(selected, rules_view if not rules_view.empty else rules_all, top_n=10)
+    if st.button("Get recommendations"):
+        recs = recommend_from_rules(picked, rules_all, top_n=n_suggest)
         if recs.empty:
             st.info("No recommendations found for that set.")
         else:
-            st.dataframe(recs)
+            recs_view = recs.rename(columns={
+                "consequent": "Suggested item",
+                "confidence": "Chance after picking (confidence)",
+                "lift": "Strength vs chance (lift)",
+                "support": "How common in baskets (support)"
+            })
+            st.dataframe(recs_view)
 
     st.markdown("---")
-    st.markdown("Visuals")
-    if not rules_view.empty:
-        r = rules_view.copy().head(500)
-        fig_sc = px.scatter(r, x="support", y="confidence", size="lift", hover_data=["antecedents","consequents"],
-                            title="Rules: Support vs Confidence (size = Lift)")
+
+    # ---------- Rule explorer (filters, plain language) ----------
+    with st.expander("Rule explorer and filters (optional)"):
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            min_sup_ui = st.slider("Minimum basket share", 0.00, 0.10, 0.02, 0.01)
+        with c2:
+            min_conf_ui = st.slider("Minimum certainty", 0.00, 1.00, 0.30, 0.05)
+        with c3:
+            min_lift_ui = st.slider("Minimum strength", 1.00, 3.00, 1.10, 0.05)
+        with c4:
+            max_ant = st.slider("Max items on left side", 1, 4, 3, 1)
+
+        include_items = st.multiselect("Show rules that apply when basket contains", options=all_products, default=[])
+        exclude_items = st.multiselect("Hide rules that mention", options=all_products, default=[])
+
+        rules_view = filter_rules(
+            rules_all,
+            include=include_items or None,
+            exclude=exclude_items or None,
+            min_support=min_sup_ui, min_conf=min_conf_ui, min_lift=min_lift_ui,
+            max_antecedent_len=max_ant
+        )
+
+        st.caption(f"{len(rules_view)} rules match the filters.")
+
+        if not rules_view.empty:
+            tidy = rules_view.copy()
+            tidy["If basket has"] = tidy["antecedents"].apply(lambda a: " + ".join(map(str, a)))
+            tidy["Suggest"] = tidy["consequents"].apply(lambda c: " + ".join(map(str, c)))
+            tidy = tidy.rename(columns={
+                "confidence": "Chance (confidence)",
+                "lift": "Strength (lift)",
+                "support": "Basket share (support)"
+            })
+            st.dataframe(tidy[["If basket has", "Suggest", "Basket share (support)",
+                               "Chance (confidence)", "Strength (lift)"]].head(300))
+        else:
+            st.info("No rules to show. Try relaxing the filters.")
+
+    st.markdown("---")
+
+    # ---------- Visualizations ----------
+    st.markdown("Visualizations")
+
+    # Choose dataset for visuals (filtered if available)
+    r = rules_view.copy() if 'rules_view' in locals() and not rules_view.empty else rules_all.copy()
+    r = r.head(500)
+
+    if not r.empty:
+        fig_sc = px.scatter(
+            r, x="support", y="confidence", size="lift",
+            hover_data=["antecedents", "consequents"],
+            title="Rules: basket share vs certainty (bubble = strength)"
+        )
         st.plotly_chart(fig_sc, use_container_width=True)
     else:
-        st.info("No rules to plot for current filters.")
+        st.info("No rules available for the scatter plot.")
 
     cA, cB = st.columns(2)
+
     with cA:
-        if not rules_view.empty and HAS_NX:
-            st.markdown("Network (top by lift)")
-            draw_rules_network_matplotlib(rules_view, top_n=20)
+        st.markdown("Network view (top by strength)")
+        if not r.empty and HAS_NX:
+            draw_rules_network_matplotlib(r.sort_values(["lift", "confidence"], ascending=False), top_n=20)
         else:
-            st.info("Install networkx for the network plot or relax filters to get rules.")
+            st.info("Install networkx to see the network view or ensure rules are available.")
+
     with cB:
-        if not rules_view.empty:
-            st.markdown("Parallel Coordinates (metrics)")
-            r = rules_view.sort_values("lift", ascending=False).head(25).copy()
-            for c in ["support","confidence","lift","leverage","conviction"]:
-                if c in r.columns:
-                    v = r[c].astype(float).values
+        st.markdown("Parallel coordinates (metrics)")
+        if not r.empty:
+            rp = r.sort_values("lift", ascending=False).head(25).copy()
+            for c in ["support", "confidence", "lift", "leverage", "conviction"]:
+                if c in rp.columns:
+                    v = rp[c].astype(float).values
                     lo, hi = np.nanmin(v), np.nanmax(v)
-                    r[c+"_norm"] = (v - lo) / (hi - lo + 1e-12)
-            r["rule"] = r.apply(lambda row: " + ".join(row["antecedents"]) + " → " + " + ".join(row["consequents"]), axis=1)
-            fig_par = px.parallel_coordinates(
-                r, dimensions=[c for c in ["support_norm","confidence_norm","lift_norm","leverage_norm","conviction_norm"] if c in r.columns],
-                color="lift_norm", color_continuous_scale=px.colors.sequential.Viridis
-            )
-            st.plotly_chart(fig_par, use_container_width=True)
+                    rp[c + "_norm"] = (v - lo) / (hi - lo + 1e-12)
+            rp["rule"] = rp.apply(lambda row: " + ".join(row["antecedents"]) + " → " +
+                                              " + ".join(row["consequents"]), axis=1)
+            dims = [c for c in ["support_norm", "confidence_norm", "lift_norm",
+                                "leverage_norm", "conviction_norm"] if c in rp.columns]
+            if dims:
+                fig_par = px.parallel_coordinates(
+                    rp, dimensions=dims, color="lift_norm",
+                    color_continuous_scale=px.colors.sequential.Viridis
+                )
+                st.plotly_chart(fig_par, use_container_width=True)
+            else:
+                st.info("No metric columns available for the parallel coordinates plot.")
         else:
-            st.info("No rules available for parallel coordinates.")
+            st.info("No rules available for the parallel coordinates plot.")
+
+    st.markdown("---")
+
+    # ---------- Metric analysis tools (simple histograms) ----------
+    st.markdown("Metric analysis")
+    if not r.empty:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.plotly_chart(px.histogram(r, x="support", nbins=30, title="Basket share (support)"), use_container_width=True)
+        with c2:
+            st.plotly_chart(px.histogram(r, x="confidence", nbins=30, title="Certainty (confidence)"), use_container_width=True)
+        with c3:
+            st.plotly_chart(px.histogram(r, x="lift", nbins=30, title="Strength (lift)"), use_container_width=True)
+    else:
+        st.info("No rules available for metric charts.")
 
 # ================================ TAB 3 ======================================
 with tab3:
@@ -415,9 +472,7 @@ with tab3:
 
     st.markdown("Executive Summary")
     st.write(f"- Chosen K: {k_value} (K-Means primary).")
-    st.write(f"- Silhouette (K-Means): {metrics['silhouette']['KMeans']:.3f}; "
-             f"Adjusted Rand Index (KM vs Agglomerative): {metrics['ari']['KM_vs_AGG']:.3f}; "
-             f"(KM vs GMM): {metrics['ari']['KM_vs_GMM']:.3f}.")
+    st.write(f"- Silhouette (K-Means): {metrics['silhouette']['KMeans']:.3f}; ARI (KM vs AGG): {metrics['ari']['KM_vs_AGG']:.3f}; (KM vs GMM): {metrics['ari']['KM_vs_GMM']:.3f}.")
     st.write("- Cluster sizes and value metrics below.")
 
     col1, col2 = st.columns(2)
@@ -428,10 +483,12 @@ with tab3:
         st.markdown("Average spend per customer by cluster ($)")
         st.bar_chart(mon)
 
-    st.markdown("---")
-    st.markdown("Top Rules (by lift)")
+    # Recompute a rules set for BI if needed
     rules_for_bi = rules_view if 'rules_view' in locals() and not rules_view.empty else rules_all
     top_rules = rules_for_bi.sort_values(["lift","confidence"], ascending=False).head(10).copy()
+
+    st.markdown("---")
+    st.markdown("Top Rules (by lift)")
     if not top_rules.empty:
         top_rules["rule"] = top_rules.apply(lambda r: " + ".join(r["antecedents"]) + " → " + " + ".join(r["consequents"]), axis=1)
         st.dataframe(top_rules[["rule","support","confidence","lift","leverage","conviction"]])
@@ -461,6 +518,6 @@ with tab3:
 - Steady Long-Term Buyers: milestone coupons, buy-again widgets, free-shipping nudges.
 - Variety Seekers (Lapsed): win-back with new arrivals and sampler bundles; time-boxed incentives.
 - One-Off Low-Spend Buyers: lightweight re-engagement; limit spend if no response after two touches.
-- Cross-sell placement: PDP and cart add-ons using lift ≥ 1.5 rules; lift 1.2–1.5 for email only.
+- Cross-sell placement: PDP widgets and cart add-ons using lift ≥ 1.5 rules; lift 1.2–1.5 for email only.
 """)
 
