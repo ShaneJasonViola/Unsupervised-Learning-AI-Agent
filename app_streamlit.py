@@ -3,13 +3,6 @@
 # ----------------------------------------------------------------------
 # Usage:
 #   streamlit run app_streamlit.py
-#
-# Notes:
-# - Loads "synthetic_retail_transactions.csv" automatically (or set env RETAIL_CSV_PATH).
-# - Implements:
-#   • Customer Segmentation Dashboard (2D/3D, stats, lookup)
-#   • Market Basket Analysis (rules explorer, recommender, visuals)
-#   • BI Summary with ROI projections
 
 import os
 import numpy as np
@@ -47,6 +40,12 @@ def load_data(path: str) -> pd.DataFrame:
     df = df[df["Quantity"] > 0]
     df = df[df["UnitPrice"] > 0]
     return df
+
+def first_product_col(df: pd.DataFrame):
+    for c in ["ProductName", "Description", "ProductID"]:
+        if c in df.columns:
+            return c
+    raise ValueError("Add one of these columns to your CSV: ProductName, Description, or ProductID.")
 
 @st.cache_data(show_spinner=False)
 def build_rfm_extras(df: pd.DataFrame) -> pd.DataFrame:
@@ -138,7 +137,6 @@ def build_boolean_basket(df_in: pd.DataFrame, product_col: str):
 def mine_rules(basket_bool: pd.DataFrame, min_support=0.02, min_conf=0.30):
     itemsets = apriori(basket_bool, min_support=min_support, use_colnames=True)
     rules = association_rules(itemsets, metric="confidence", min_threshold=min_conf)
-    # keep support filter
     rules = rules.query("support >= @min_support").copy()
     rules["antecedents"] = rules["antecedents"].apply(lambda s: list(s))
     rules["consequents"] = rules["consequents"].apply(lambda s: list(s))
@@ -225,21 +223,17 @@ def build_roi_table(rules_df, df, product_col, eligible=10_000, margin=0.35, cos
 # ------------------------------ Sidebar --------------------------------------
 st.sidebar.title("CIS 9660 • Data Mining • Project #2")
 
-# Load data silently (no upload/path UI)
-DATA_PATH = os.getenv("RETAIL_CSV_PATH", "synthetic_retail_transactions.csv")
-if not os.path.exists(DATA_PATH):
-    st.error(f"CSV not found at '{DATA_PATH}'. Place the file next to this app or set RETAIL_CSV_PATH.")
+DEFAULT_CSV = "synthetic_retail_transactions.csv"
+if not os.path.exists(DEFAULT_CSV):
+    st.error(f"CSV not found: {DEFAULT_CSV}")
     st.stop()
-df = load_data(DATA_PATH)
+df = load_data(DEFAULT_CSV)
 
-# Product column dropdown (auto-detected)
-candidate_product_cols = [c for c in ["ProductName", "Description", "ProductID"] if c in df.columns]
-if not candidate_product_cols:
-    st.error("No product column found. Add one of: ProductName, Description, ProductID")
-    st.stop()
-PRODUCT_COL = st.sidebar.selectbox("Product column", options=candidate_product_cols, index=0)
+# Product column as a DROPDOWN (no upload UI)
+candidate_cols = [c for c in ["ProductName","Description","ProductID"] if c in df.columns]
+default_prod_col = first_product_col(df)
+product_col = st.sidebar.selectbox("Product column", options=candidate_cols, index=candidate_cols.index(default_prod_col))
 
-# Clustering + rules controls
 k_value = st.sidebar.slider("K for clustering", 2, 10, 5, 1)
 seed = st.sidebar.number_input("Random seed", value=42, step=1)
 
@@ -305,26 +299,42 @@ with tab1:
         st.write(f"Silhouette — KM: **{metrics['silhouette']['KMeans']:.3f}**, AGG: {metrics['silhouette']['Agglomerative']:.3f}, GMM: {metrics['silhouette']['GMM']:.3f}")
         st.write(f"Calinski-Harabasz (KM): **{metrics['calinski_harabasz']:.1f}**")
         st.write(f"Davies-Bouldin (KM): **{metrics['davies_bouldin']:.3f}**")
-        st.write(f"ARI — KM vs AGG: **{metrics['ari']['KM_vs_AGG']:.3f}**, KM vs GMM: **{metrics['ari']['KM_vs_GMM']:.3f}**")
 
     st.markdown("---")
     st.markdown("**Segment Comparison (cluster means)**")
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
     st.dataframe(cluster_profiles)
 
-    st.markdown("**Customer Lookup**")
-    lookup_id = st.text_input("Enter CustomerID")
-    if lookup_id:
+    # ---------------------- Customer Lookup Tool ----------------------
+    st.markdown("---")
+    st.markdown("### 🔎 Customer Lookup")
+    st.caption("Enter a CustomerID or pick from the dropdown to see the segment assignment and their key metrics.")
+
+    # Build a dropdown list for convenience (stringified to cover mixed types)
+    id_options = sorted(list(map(str, rfm_k["CustomerID"].unique())))
+    col1, col2 = st.columns([2,1])
+
+    with col1:
+        lookup_text = st.text_input("Type CustomerID", placeholder="e.g., 12345")
+    with col2:
+        lookup_select = st.selectbox("...or select", options=[""] + id_options, index=0)
+
+    # Resolve the input (text wins if provided)
+    chosen_id_raw = lookup_text.strip() if lookup_text.strip() else lookup_select.strip()
+    if chosen_id_raw:
+        # match either numeric or string CustomerID
+        # try numeric match first
         try:
-            cid = int(lookup_id)
-        except:
-            cid = lookup_id
-        row = rfm_k.loc[rfm_k["CustomerID"] == cid]
+            chosen_num = pd.to_numeric(chosen_id_raw)
+            row = rfm_k.loc[rfm_k["CustomerID"] == chosen_num]
+        except Exception:
+            row = rfm_k.loc[rfm_k["CustomerID"].astype(str) == chosen_id_raw]
+
         if row.empty:
-            st.warning("CustomerID not found in the filtered set.")
+            st.warning("CustomerID not found in the filtered dataset.")
         else:
             cl = int(row["Cluster"].iloc[0])
-            st.success(f"Customer {cid} is in **Cluster {cl}**.")
+            st.success(f"Customer **{chosen_id_raw}** is in **Cluster {cl}**.")
             st.write(row[["Recency","Frequency","Monetary","AvgOrderValue","ProductDiversity",
                           "TotalQuantity","AvgQuantityPerTransaction","CategoryDiversity",
                           "PurchaseSpan","AvgDaysBetweenPurchases"]])
@@ -333,7 +343,7 @@ with tab1:
 with tab2:
     st.subheader("Market Basket Analysis")
 
-    basket_bool, PRODUCT_COL = build_boolean_basket(df, PRODUCT_COL)
+    basket_bool, PRODUCT_COL = build_boolean_basket(df, product_col)
     rules_all, itemsets = mine_rules(basket_bool, min_support=min_support, min_conf=min_conf)
 
     st.markdown("**Rule Filters**")
@@ -372,7 +382,6 @@ with tab2:
 
     st.markdown("---")
     st.markdown("**Visuals**")
-    # Scatter (support vs confidence; bubble size lift)
     if not rules_view.empty:
         r = rules_view.copy().head(500)
         fig_sc = px.scatter(r, x="support", y="confidence", size="lift", hover_data=["antecedents","consequents"],
@@ -399,10 +408,8 @@ with tab2:
                     r[c+"_norm"] = (v - lo) / (hi - lo + 1e-12)
             r["rule"] = r.apply(lambda row: " + ".join(row["antecedents"]) + " → " + " + ".join(row["consequents"]), axis=1)
             fig_par = px.parallel_coordinates(
-                r,
-                dimensions=[c for c in ["support_norm","confidence_norm","lift_norm","leverage_norm","conviction_norm"] if c in r.columns],
-                color="lift_norm",
-                color_continuous_scale=px.colors.sequential.Viridis
+                r, dimensions=[c for c in ["support_norm","confidence_norm","lift_norm","leverage_norm","conviction_norm"] if c in r.columns],
+                color="lift_norm", color_continuous_scale=px.colors.sequential.Viridis
             )
             st.plotly_chart(fig_par, use_container_width=True)
         else:
@@ -412,14 +419,14 @@ with tab2:
 with tab3:
     st.subheader("Business Intelligence Summary")
 
-    # Executive summary pieces
     sizes = rfm_k["Cluster"].value_counts().sort_index()
     aov = rfm_k.groupby("Cluster")["AvgOrderValue"].mean().round(2)
     mon = rfm_k.groupby("Cluster")["Monetary"].mean().round(2)
 
     st.markdown("**Executive Summary (auto-filled)**")
     st.write(f"- Chosen K: **{k_value}** (K-Means primary).")
-    st.write(f"- Silhouette (K-Means): **{metrics['silhouette']['KMeans']:.3f}**; ARI (KM vs AGG): **{metrics['ari']['KM_vs_AGG']:.3f}**; (KM vs GMM): **{metrics['ari']['KM_vs_GMM']:.3f}**.")
+    st.write(f"- Silhouette (K-Means): **{metrics['silhouette']['KMeans']:.3f}**; "
+             f"ARI (KM vs AGG): **{metrics['ari']['KM_vs_AGG']:.3f}**, KM vs GMM: **{metrics['ari']['KM_vs_GMM']:.3f}**.")
     st.write("- Cluster sizes and value metrics below.")
 
     col1, col2 = st.columns(2)
@@ -432,7 +439,7 @@ with tab3:
 
     st.markdown("---")
     st.markdown("**Top Rules (by lift)**")
-    rules_for_bi = (rules_view if 'rules_view' in locals() and not rules_view.empty else rules_all)
+    rules_for_bi = rules_view if 'rules_view' in locals() and not rules_view.empty else rules_all
     top_rules = rules_for_bi.sort_values(["lift","confidence"], ascending=False).head(10).copy()
     if not top_rules.empty:
         top_rules["rule"] = top_rules.apply(lambda r: " + ".join(r["antecedents"]) + " → " + " + ".join(r["consequents"]), axis=1)
@@ -441,7 +448,7 @@ with tab3:
         st.info("No rules to display.")
 
     st.markdown("**ROI Projections**")
-    roi_table = build_roi_table(rules_for_bi, df, PRODUCT_COL, eligible=eligible, margin=margin, cost=cost, top_n=10)
+    roi_table = build_roi_table(rules_for_bi, df, product_col, eligible=eligible, margin=margin, cost=cost, top_n=10)
     if roi_table.empty:
         st.info("No ROI rows (no rules).")
     else:
@@ -463,6 +470,7 @@ with tab3:
 - **Steady Long-Term Buyers**: milestone coupons, buy-again widgets, free-shipping nudges.
 - **Variety Seekers (Lapsed)**: win-back with new arrivals & sampler bundles; time-boxed incentives.
 - **One-Off Low-Spend Buyers**: lightweight re-engagement; limit spend if no response after two touches.
-- **Cross-sell placement**: PDP widgets + cart add-ons using **lift ≥ 1.5** rules; lift 1.2–1.5 for email only.
+- **Cross-sell placement**: PDP + cart add-ons using **lift ≥ 1.5** rules; lift 1.2–1.5 for email only.
 """)
+
 
