@@ -1,13 +1,22 @@
 # app_streamlit.py
 # Streamlit App: Customer Segmentation + Market Basket + BI Summary (ROI)
-# Usage: streamlit run app_streamlit.py
+# Usage:
+#   streamlit run app_streamlit.py
+#
+# Notes:
+# - Reads "synthetic_retail_transactions.csv" from the repo root.
+# - Auto-detects the product column: ProductName, then Description, then ProductID.
+# - Tabs:
+#   1) Customer Segmentation (2D/3D, stats, lookup)
+#   2) Market Basket (simple recommender + optional filters + visuals)
+#   3) BI Summary and ROI
 
 import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from datetime import datetime
+import plotly.graph_objects as go
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
@@ -18,40 +27,48 @@ from sklearn.metrics import (
 )
 from mlxtend.frequent_patterns import apriori, association_rules
 
-# Optional (network graph)
+# Optional network graph
 try:
     import networkx as nx
     HAS_NX = True
 except Exception:
     HAS_NX = False
+
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Retail Analytics: Segmentation & Market Basket",
-                   layout="wide")
+st.set_page_config(page_title="Retail Analytics: Segmentation and Market Basket", layout="wide")
+
 
 # ------------------------------- Helpers --------------------------------------
+@st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["InvoiceDate"])
+    # basics
     if "Amount" not in df.columns:
         df["Amount"] = df["Quantity"] * df["UnitPrice"]
-    # basic cleaning
     df = df[df["Quantity"] > 0]
     df = df[df["UnitPrice"] > 0]
     return df
 
-def detect_product_columns(df: pd.DataFrame):
-    return [c for c in ["ProductName", "Description", "ProductID"] if c in df.columns]
 
+def ensure_product_col(df: pd.DataFrame) -> str:
+    """Auto-pick the first matching product column without exposing a UI."""
+    for c in ["ProductName", "Description", "ProductID"]:
+        if c in df.columns:
+            return c
+    raise ValueError("No product column found. Add one of: ProductName, Description, ProductID")
+
+
+@st.cache_data(show_spinner=False)
 def build_rfm_extras(df: pd.DataFrame) -> pd.DataFrame:
     current_date = df["InvoiceDate"].max() + pd.Timedelta(days=1)
     rfm = df.groupby("CustomerID").agg({
-        "InvoiceDate": lambda x: (current_date - x.max()).days,  # Recency
-        "InvoiceNo": "nunique",                                   # Frequency
-        "Amount": "sum"                                           # Monetary
+        "InvoiceDate": lambda x: (current_date - x.max()).days,
+        "InvoiceNo": "nunique",
+        "Amount": "sum"
     }).reset_index()
     rfm.columns = ["CustomerID", "Recency", "Frequency", "Monetary"]
 
-    # extras
     rfm = (
         rfm.merge(df.groupby("CustomerID")["Amount"].mean().reset_index(name="AvgOrderValue"), on="CustomerID")
            .merge(df.groupby("CustomerID")["ProductID"].nunique().reset_index(name="ProductDiversity"), on="CustomerID")
@@ -64,60 +81,64 @@ def build_rfm_extras(df: pd.DataFrame) -> pd.DataFrame:
     )
     return rfm
 
+
 CLUSTER_FEATURES = [
     "Recency","Frequency","Monetary","AvgOrderValue","ProductDiversity",
     "TotalQuantity","AvgQuantityPerTransaction","CategoryDiversity",
     "PurchaseSpan","AvgDaysBetweenPurchases"
 ]
 
+
+@st.cache_data(show_spinner=False)
 def scale_and_filter(rfm: pd.DataFrame):
     X = rfm[CLUSTER_FEATURES].copy()
     X.replace([np.inf, -np.inf], np.nan, inplace=True)
     X = X.fillna(X.median(numeric_only=True))
 
-    # IQR outlier filter
+    # IQR filter
     Q1, Q3 = X.quantile(0.25), X.quantile(0.75)
     IQR = Q3 - Q1
-    lower, upper = Q1 - 1.5*IQR, Q3 + 1.5*IQR
-    mask = ~((X < lower) | (X > upper)).any(axis=1)
+    mask = ~((X < (Q1 - 1.5*IQR)) | (X > (Q3 + 1.5*IQR))).any(axis=1)
+
     X_clean = X.loc[mask].copy()
     rfm_clean = rfm.loc[mask].copy()
-
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_clean)
     return X_clean, rfm_clean, scaler, X_scaled
 
-def fit_kmeans_alt(X_scaled, rfm_clean, k=5, seed=42):
+
+def fit_kmeans_alt(X_scaled, rfm_clean, k=5):
+    """Fit KMeans + alternate methods. Seed fixed; no UI control."""
+    seed = 42
     kmeans = KMeans(n_clusters=k, n_init=20, random_state=seed)
     clusters = kmeans.fit_predict(X_scaled)
     rfm_k = rfm_clean.copy()
     rfm_k["Cluster"] = clusters
 
-    # Alt methods
     agg = AgglomerativeClustering(n_clusters=k, linkage="ward", metric="euclidean")
     agg_labels = agg.fit_predict(X_scaled)
     gmm = GaussianMixture(n_components=k, covariance_type="full", random_state=seed)
     gmm_labels = gmm.fit_predict(X_scaled)
 
-    # metrics
     s_km = silhouette_score(X_scaled, clusters)
     s_agg = silhouette_score(X_scaled, agg_labels)
     s_gmm = silhouette_score(X_scaled, gmm_labels)
     ch_km = calinski_harabasz_score(X_scaled, clusters)
     db_km = davies_bouldin_score(X_scaled, clusters)
-    ari_km_agg = adjusted_rand_score(clusters, agg_labels)
-    ari_km_gmm = adjusted_rand_score(clusters, gmm_labels)
-    ari_agg_gmm = adjusted_rand_score(agg_labels, gmm_labels)
-
     metrics = {
         "silhouette": {"KMeans": s_km, "Agglomerative": s_agg, "GMM": s_gmm},
         "calinski_harabasz": ch_km,
         "davies_bouldin": db_km,
-        "ari": {"KM_vs_AGG": ari_km_agg, "KM_vs_GMM": ari_km_gmm, "AGG_vs_GMM": ari_agg_gmm},
+        "ari": {
+            "KM_vs_AGG": adjusted_rand_score(clusters, agg_labels),
+            "KM_vs_GMM": adjusted_rand_score(clusters, gmm_labels),
+            "AGG_vs_GMM": adjusted_rand_score(agg_labels, gmm_labels)
+        }
     }
     return kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics
 
-# Market Basket pieces
+
+# ----------------------- Market Basket helpers --------------------------------
 def build_boolean_basket(df_in: pd.DataFrame, product_col: str):
     sub = df_in.loc[:, ["InvoiceNo", product_col, "Quantity"]].copy()
     sub = sub.dropna(subset=["InvoiceNo", product_col, "Quantity"])
@@ -127,16 +148,17 @@ def build_boolean_basket(df_in: pd.DataFrame, product_col: str):
     basket = sub.groupby(["InvoiceNo", product_col])["Quantity"].sum().unstack(fill_value=0)
     return basket.gt(0), product_col
 
+
 def mine_rules(basket_bool: pd.DataFrame, min_support=0.02, min_conf=0.30):
     itemsets = apriori(basket_bool, min_support=min_support, use_colnames=True)
     rules = association_rules(itemsets, metric="confidence", min_threshold=min_conf)
-    # keep support filter
     rules = rules.query("support >= @min_support").copy()
     rules["antecedents"] = rules["antecedents"].apply(lambda s: list(s))
     rules["consequents"] = rules["consequents"].apply(lambda s: list(s))
     rules["antecedent_len"] = rules["antecedents"].apply(len)
     rules["consequent_len"] = rules["consequents"].apply(len)
     return rules, itemsets
+
 
 def filter_rules(rules_df, include=None, exclude=None,
                  min_support=0.02, min_conf=0.30, min_lift=1.10,
@@ -153,6 +175,7 @@ def filter_rules(rules_df, include=None, exclude=None,
         r = r[~r["consequents"].apply(lambda cons: bool(set(cons) & exc))]
     return r.sort_values(["lift","confidence","support"], ascending=False)
 
+
 def recommend_from_rules(products, rules_df, top_n=10):
     prods = set(products)
     if not prods:
@@ -163,6 +186,7 @@ def recommend_from_rules(products, rules_df, top_n=10):
             .rename(columns={"consequents":"consequent"}))
     recs = recs[~recs["consequent"].isin(prods)]
     return recs.sort_values(["lift","confidence","support"], ascending=False).head(top_n).reset_index(drop=True)
+
 
 def draw_rules_network_matplotlib(rules_df, top_n=20):
     if not HAS_NX or rules_df.empty:
@@ -180,6 +204,7 @@ def draw_rules_network_matplotlib(rules_df, top_n=20):
             node_color=["#4c72b0" if G.nodes[n]["kind"]=="a" else "#dd8452" for n in G.nodes()])
     st.pyplot(plt.gcf())
     plt.close()
+
 
 def build_roi_table(rules_df, df, product_col, eligible=10_000, margin=0.35, cost=1500.0, top_n=10):
     if rules_df.empty:
@@ -214,57 +239,60 @@ def build_roi_table(rules_df, df, product_col, eligible=10_000, margin=0.35, cos
         })
     return pd.DataFrame(rows)
 
+
 # ------------------------------ Sidebar --------------------------------------
-st.sidebar.title("CIS 9660 • Data Mining • Project #2")
+st.sidebar.title("CIS 9660  ·  Data Mining  ·  Project 2")
 
-# Fixed CSV path; no upload UI
-default_csv = "synthetic_retail_transactions.csv"
-if not os.path.exists(default_csv):
-    st.sidebar.error(f"CSV not found at {default_csv}.")
-    st.stop()
-
-# Load once to populate sidebar controls
-_df_preview = load_data(default_csv)
-product_options = detect_product_columns(_df_preview)
-if not product_options:
-    st.sidebar.error("No product column found. Add one of: ProductName, Description, ProductID")
-    st.stop()
-product_col = st.sidebar.selectbox("Product column", options=product_options, index=0)
-
-k_value = st.sidebar.slider("K for clustering", 2, 10, 5, 1)
+# Keep only model and ROI knobs (no file paths, no product column, no seed)
+k_value    = st.sidebar.slider("Number of clusters (K)", 2, 10, 5, 1)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("Association rule thresholds")
-min_support = st.sidebar.slider("Min support", 0.01, 0.10, 0.02, 0.01)
-min_conf    = st.sidebar.slider("Min confidence", 0.10, 0.90, 0.30, 0.05)
-min_lift    = st.sidebar.slider("Min lift", 1.0, 3.0, 1.10, 0.05)
+st.sidebar.markdown("Rule thresholds")
+min_support = st.sidebar.slider("How common (support)", 0.01, 0.10, 0.02, 0.01)
+min_conf    = st.sidebar.slider("How reliable (confidence)", 0.10, 0.90, 0.30, 0.05)
+min_lift    = st.sidebar.slider("Strength (lift)", 1.0, 3.0, 1.10, 0.05)
 
 st.sidebar.markdown("---")
-eligible = st.sidebar.number_input("Eligible baskets (ROI)", value=10_000, step=1000)
+eligible = st.sidebar.number_input("Eligible baskets for ROI", value=10_000, step=1000)
 margin   = st.sidebar.number_input("Gross margin (0-1)", value=0.35, step=0.05, min_value=0.0, max_value=1.0)
 cost     = st.sidebar.number_input("Campaign cost ($)", value=1500.0, step=100.0)
 
+
 # ------------------------------ Load data ------------------------------------
-df = _df_preview.copy()  # already cleaned by load_data
+DEFAULT_CSV = "synthetic_retail_transactions.csv"
+if not os.path.exists(DEFAULT_CSV):
+    st.error(f"CSV not found at {DEFAULT_CSV}. Add the file to your repo.")
+    st.stop()
+
+df = load_data(DEFAULT_CSV)
+try:
+    PRODUCT_COL = ensure_product_col(df)
+except ValueError as e:
+    st.error(str(e)); st.stop()
+
 
 # --------------------------- Compute RFM & Clusters ---------------------------
 rfm = build_rfm_extras(df)
 X_clean, rfm_clean, scaler, X_scaled = scale_and_filter(rfm)
-kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics = fit_kmeans_alt(
-    X_scaled, rfm_clean, k=k_value, seed=42
-)
+kmeans, clusters, agg_labels, gmm_labels, rfm_k, metrics = fit_kmeans_alt(X_scaled, rfm_clean, k=k_value)
 
-# PCA once for visualizations
+# PCA for visuals
 pca = PCA(n_components=3).fit(X_scaled)
 X_pca = pca.transform(X_scaled)
 exp_var = pca.explained_variance_ratio_
 
+# Build initial market-basket rules once so tabs share them
+basket_bool, PRODUCT_COL = build_boolean_basket(df, PRODUCT_COL)
+rules_all, itemsets = mine_rules(basket_bool, min_support=min_support, min_conf=min_conf)
+
+
 # ------------------------------- Tabs ----------------------------------------
 tab1, tab2, tab3 = st.tabs(["Customer Segmentation", "Market Basket Analysis", "BI Summary and ROI"])
 
+
 # ================================ TAB 1 ======================================
 with tab1:
-    st.subheader("Customer Segmentation Dashboard")
+    st.subheader("Customer Segmentation")
 
     colA, colB = st.columns([3,2])
     with colA:
@@ -275,17 +303,20 @@ with tab1:
         })
         fig2d = px.scatter(df_plot, x="PC1", y="PC2", color="Cluster",
                            hover_data=["CustomerID"],
-                           title=f"2D PCA (var={exp_var[0]+exp_var[1]:.1%})")
+                           title=f"2D PCA (variance explained {exp_var[0]+exp_var[1]:.1%})")
         st.plotly_chart(fig2d, use_container_width=True)
 
         st.markdown("3D PCA Scatter")
         df_plot3 = pd.DataFrame({
-            "PC1": X_pca[:,0], "PC2": X_pca[:,1], "PC3": X_pca[:,2] if X_pca.shape[1] > 2 else X_pca[:,1]*0,
-            "Cluster": clusters.astype(int), "CustomerID": rfm_clean["CustomerID"].values
+            "PC1": X_pca[:,0],
+            "PC2": X_pca[:,1],
+            "PC3": X_pca[:,2] if X_pca.shape[1] > 2 else X_pca[:,1]*0,
+            "Cluster": clusters.astype(int),
+            "CustomerID": rfm_clean["CustomerID"].values
         })
         fig3d = px.scatter_3d(df_plot3, x="PC1", y="PC2", z="PC3", color="Cluster",
                               hover_data=["CustomerID"],
-                              title=f"3D PCA (var={exp_var[:3].sum():.1%})")
+                              title=f"3D PCA (variance explained {exp_var[:3].sum():.1%})")
         st.plotly_chart(fig3d, use_container_width=True)
 
     with colB:
@@ -296,16 +327,19 @@ with tab1:
         stats_df = pd.DataFrame({"Customers": sizes, "AvgOrderValue": aov, "AvgMonetary": mon})
         st.dataframe(stats_df)
 
-        st.markdown("Validation snapshots")
-        st.write(f"Silhouette — KM: {metrics['silhouette']['KMeans']:.3f}, AGG: {metrics['silhouette']['Agglomerative']:.3f}, GMM: {metrics['silhouette']['GMM']:.3f}")
+        st.markdown("Validation Snapshots")
+        st.write(f"Silhouette — KM: {metrics['silhouette']['KMeans']:.3f}, "
+                 f"AGG: {metrics['silhouette']['Agglomerative']:.3f}, "
+                 f"GMM: {metrics['silhouette']['GMM']:.3f}")
         st.write(f"Calinski-Harabasz (KM): {metrics['calinski_harabasz']:.1f}")
         st.write(f"Davies-Bouldin (KM): {metrics['davies_bouldin']:.3f}")
-        st.write(f"ARI — KM vs AGG: {metrics['ari']['KM_vs_AGG']:.3f}, KM vs GMM: {metrics['ari']['KM_vs_GMM']:.3f}")
+        st.write(f"ARI — KM vs AGG: {metrics['ari']['KM_vs_AGG']:.3f}, "
+                 f"KM vs GMM: {metrics['ari']['KM_vs_GMM']:.3f}")
 
     st.markdown("---")
     st.markdown("Segment Comparison (cluster means)")
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
-    st.dataframe(cluster_profiles)
+    st.dataframe(cluster_profiles, use_container_width=True)
 
     st.markdown("Customer Lookup")
     lookup_id = st.text_input("Enter CustomerID")
@@ -324,156 +358,117 @@ with tab1:
                           "TotalQuantity","AvgQuantityPerTransaction","CategoryDiversity",
                           "PurchaseSpan","AvgDaysBetweenPurchases"]])
 
+
 # ================================ TAB 2 ======================================
 with tab2:
     st.subheader("Market Basket Analysis")
 
-    # Build rules for this tab
-    basket_bool, PRODUCT_COL = build_boolean_basket(df, product_col)
-    rules_all, itemsets = mine_rules(basket_bool, min_support=min_support, min_conf=min_conf)
+    # ---------------- Simple recommender ----------------
+    st.markdown("Product Recommender")
     all_products = list(basket_bool.columns)
-
-    # ---------- Quick recommendations (simple UI) ----------
-    st.markdown("Quick recommendations")
-    picked = st.multiselect(
-        "Pick one or more items in the shopper’s basket",
-        options=all_products, default=[]
-    )
-    n_suggest = st.slider("How many suggestions to show", 1, 15, 10)
-
+    base_product = st.selectbox("Pick a product", options=sorted(all_products))
     if st.button("Get recommendations"):
-        recs = recommend_from_rules(picked, rules_all, top_n=n_suggest)
+        # use all rules; user can further refine below in the explorer
+        recs = recommend_from_rules({base_product}, rules_all, top_n=10)
         if recs.empty:
-            st.info("No recommendations found for that set.")
+            st.info("No recommendations found for that product.")
         else:
-            recs_view = recs.rename(columns={
-                "consequent": "Suggested item",
-                "confidence": "Chance after picking (confidence)",
-                "lift": "Strength vs chance (lift)",
-                "support": "How common in baskets (support)"
-            })
-            st.dataframe(recs_view)
+            st.dataframe(recs, use_container_width=True)
 
     st.markdown("---")
 
-    # ---------- Rule explorer (filters, plain language) ----------
-    with st.expander("Rule explorer and filters (optional)"):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            min_sup_ui = st.slider("Minimum basket share", 0.00, 0.10, 0.02, 0.01)
-        with c2:
-            min_conf_ui = st.slider("Minimum certainty", 0.00, 1.00, 0.30, 0.05)
-        with c3:
-            min_lift_ui = st.slider("Minimum strength", 1.00, 3.00, 1.10, 0.05)
-        with c4:
-            max_ant = st.slider("Max items on left side", 1, 4, 3, 1)
+    # ---------------- Rules explorer (friendlier labels) ----------------
+    st.markdown("Rule Explorer")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        min_sup_ui = st.number_input("How common (support)", value=float(min_support), step=0.01, min_value=0.0)
+    with c2:
+        min_conf_ui = st.number_input("How reliable (confidence)", value=float(min_conf), step=0.05, min_value=0.0, max_value=1.0)
+    with c3:
+        min_lift_ui = st.number_input("Strength (lift)", value=float(min_lift), step=0.05, min_value=1.0)
+    with c4:
+        max_ant = st.number_input("Max items in the if-part", value=3, step=1, min_value=1)
 
-        include_items = st.multiselect("Show rules that apply when basket contains", options=all_products, default=[])
-        exclude_items = st.multiselect("Hide rules that mention", options=all_products, default=[])
+    include_items = st.multiselect("Must include in the if-part", options=sorted(all_products), default=[])
+    exclude_items = st.multiselect("Exclude anywhere", options=sorted(all_products), default=[])
 
-        rules_view = filter_rules(
-            rules_all,
-            include=include_items or None,
-            exclude=exclude_items or None,
-            min_support=min_sup_ui, min_conf=min_conf_ui, min_lift=min_lift_ui,
-            max_antecedent_len=max_ant
-        )
+    rules_view = filter_rules(
+        rules_all,
+        include=include_items or None,
+        exclude=exclude_items or None,
+        min_support=min_sup_ui, min_conf=min_conf_ui, min_lift=min_lift_ui,
+        max_antecedent_len=max_ant
+    )
+    st.caption(f"{len(rules_view)} rules after filtering.")
+    st.dataframe(rules_view[["antecedents","consequents","support","confidence","lift","leverage","conviction"]].head(300),
+                 use_container_width=True)
 
-        st.caption(f"{len(rules_view)} rules match the filters.")
-
-        if not rules_view.empty:
-            tidy = rules_view.copy()
-            tidy["If basket has"] = tidy["antecedents"].apply(lambda a: " + ".join(map(str, a)))
-            tidy["Suggest"] = tidy["consequents"].apply(lambda c: " + ".join(map(str, c)))
-            tidy = tidy.rename(columns={
-                "confidence": "Chance (confidence)",
-                "lift": "Strength (lift)",
-                "support": "Basket share (support)"
-            })
-            st.dataframe(tidy[["If basket has", "Suggest", "Basket share (support)",
-                               "Chance (confidence)", "Strength (lift)"]].head(300))
-        else:
-            st.info("No rules to show. Try relaxing the filters.")
+    # make available to tab3
+    st.session_state["rules_view"] = rules_view
 
     st.markdown("---")
-
-    # ---------- Visualizations ----------
     st.markdown("Visualizations")
 
-    # Choose dataset for visuals (filtered if available)
-    r = rules_view.copy() if 'rules_view' in locals() and not rules_view.empty else rules_all.copy()
-    r = r.head(500)
-
-    if not r.empty:
+    # Scatter: support vs confidence, size = lift
+    if not rules_view.empty:
+        r = rules_view.copy().head(500)
         fig_sc = px.scatter(
             r, x="support", y="confidence", size="lift",
-            hover_data=["antecedents", "consequents"],
-            title="Rules: basket share vs certainty (bubble = strength)"
+            hover_data=["antecedents","consequents"],
+            title="Support vs Confidence (bubble size = Lift)"
         )
         st.plotly_chart(fig_sc, use_container_width=True)
     else:
-        st.info("No rules available for the scatter plot.")
+        st.info("No rules to plot for current filters.")
 
-    cA, cB = st.columns(2)
-
-    with cA:
-        st.markdown("Network view (top by strength)")
-        if not r.empty and HAS_NX:
-            draw_rules_network_matplotlib(r.sort_values(["lift", "confidence"], ascending=False), top_n=20)
+    colV1, colV2 = st.columns(2)
+    with colV1:
+        if not rules_view.empty and HAS_NX:
+            st.markdown("Network (top by lift)")
+            draw_rules_network_matplotlib(rules_view, top_n=20)
         else:
-            st.info("Install networkx to see the network view or ensure rules are available.")
+            st.info("Install networkx for the network plot or relax filters to get rules.")
 
-    with cB:
-        st.markdown("Parallel coordinates (metrics)")
-        if not r.empty:
-            rp = r.sort_values("lift", ascending=False).head(25).copy()
-            for c in ["support", "confidence", "lift", "leverage", "conviction"]:
-                if c in rp.columns:
-                    v = rp[c].astype(float).values
-                    lo, hi = np.nanmin(v), np.nanmax(v)
-                    rp[c + "_norm"] = (v - lo) / (hi - lo + 1e-12)
-            rp["rule"] = rp.apply(lambda row: " + ".join(row["antecedents"]) + " → " +
-                                              " + ".join(row["consequents"]), axis=1)
-            dims = [c for c in ["support_norm", "confidence_norm", "lift_norm",
-                                "leverage_norm", "conviction_norm"] if c in rp.columns]
-            if dims:
-                fig_par = px.parallel_coordinates(
-                    rp, dimensions=dims, color="lift_norm",
-                    color_continuous_scale=px.colors.sequential.Viridis
+    with colV2:
+        if not rules_view.empty:
+            st.markdown("Top Rules by Lift")
+            top_rules = rules_view.sort_values(["lift","confidence"], ascending=False).head(10).copy()
+            top_rules["rule"] = top_rules.apply(
+                lambda r: " + ".join(r["antecedents"]) + " → " + " + ".join(r["consequents"]), axis=1
+            )
+            fig_bar = go.Figure(
+                data=go.Bar(
+                    x=top_rules["lift"],
+                    y=top_rules["rule"],
+                    orientation="h",
+                    text=[f"lift {v:.2f}" for v in top_rules["lift"]],
+                    textposition="outside"
                 )
-                st.plotly_chart(fig_par, use_container_width=True)
-            else:
-                st.info("No metric columns available for the parallel coordinates plot.")
+            )
+            fig_bar.update_layout(
+                xaxis_title="Lift",
+                yaxis_title="Rule",
+                height=max(420, 26*len(top_rules)+120),
+                margin=dict(l=10, r=20, t=40, b=10)
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
         else:
-            st.info("No rules available for the parallel coordinates plot.")
+            st.info("No rules available for bar chart.")
 
-    st.markdown("---")
-
-    # ---------- Metric analysis tools (simple histograms) ----------
-    st.markdown("Metric analysis")
-    if not r.empty:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.plotly_chart(px.histogram(r, x="support", nbins=30, title="Basket share (support)"), use_container_width=True)
-        with c2:
-            st.plotly_chart(px.histogram(r, x="confidence", nbins=30, title="Certainty (confidence)"), use_container_width=True)
-        with c3:
-            st.plotly_chart(px.histogram(r, x="lift", nbins=30, title="Strength (lift)"), use_container_width=True)
-    else:
-        st.info("No rules available for metric charts.")
 
 # ================================ TAB 3 ======================================
 with tab3:
     st.subheader("Business Intelligence Summary")
 
+    # Executive summary
     sizes = rfm_k["Cluster"].value_counts().sort_index()
-    aov = rfm_k.groupby("Cluster")["AvgOrderValue"].mean().round(2)
     mon = rfm_k.groupby("Cluster")["Monetary"].mean().round(2)
 
     st.markdown("Executive Summary")
     st.write(f"- Chosen K: {k_value} (K-Means primary).")
-    st.write(f"- Silhouette (K-Means): {metrics['silhouette']['KMeans']:.3f}; ARI (KM vs AGG): {metrics['ari']['KM_vs_AGG']:.3f}; (KM vs GMM): {metrics['ari']['KM_vs_GMM']:.3f}.")
-    st.write("- Cluster sizes and value metrics below.")
+    st.write(f"- Silhouette (K-Means): {metrics['silhouette']['KMeans']:.3f}; "
+             f"ARI (KM vs AGG): {metrics['ari']['KM_vs_AGG']:.3f}; "
+             f"ARI (KM vs GMM): {metrics['ari']['KM_vs_GMM']:.3f}.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -483,34 +478,66 @@ with tab3:
         st.markdown("Average spend per customer by cluster ($)")
         st.bar_chart(mon)
 
-    # Recompute a rules set for BI if needed
-    rules_for_bi = rules_view if 'rules_view' in locals() and not rules_view.empty else rules_all
-    top_rules = rules_for_bi.sort_values(["lift","confidence"], ascending=False).head(10).copy()
+    # Rules for BI
+    rules_for_bi = st.session_state.get("rules_view", rules_all)
+    top_rules_bi = rules_for_bi.sort_values(["lift","confidence"], ascending=False).head(10).copy()
 
-    st.markdown("---")
     st.markdown("Top Rules (by lift)")
-    if not top_rules.empty:
-        top_rules["rule"] = top_rules.apply(lambda r: " + ".join(r["antecedents"]) + " → " + " + ".join(r["consequents"]), axis=1)
-        st.dataframe(top_rules[["rule","support","confidence","lift","leverage","conviction"]])
+    if not top_rules_bi.empty:
+        top_rules_bi["rule"] = top_rules_bi.apply(
+            lambda r: " + ".join(r["antecedents"]) + " → " + " + ".join(r["consequents"]), axis=1
+        )
+        st.dataframe(top_rules_bi[["rule","support","confidence","lift","leverage","conviction"]],
+                     use_container_width=True)
+
+        # nicer bar
+        fig_bar2 = go.Figure(
+            data=go.Bar(
+                x=top_rules_bi["lift"],
+                y=top_rules_bi["rule"],
+                orientation="h",
+                text=[f"{v:.2f}" for v in top_rules_bi["lift"]],
+                textposition="outside"
+            )
+        )
+        fig_bar2.update_layout(
+            title="Top Rules by Lift",
+            xaxis_title="Lift",
+            yaxis_title="Rule",
+            height=max(420, 26*len(top_rules_bi)+120),
+            margin=dict(l=10, r=20, t=40, b=10)
+        )
+        st.plotly_chart(fig_bar2, use_container_width=True)
     else:
         st.info("No rules to display.")
 
     st.markdown("ROI Projections")
-    roi_table = build_roi_table(rules_for_bi, df, product_col, eligible=eligible, margin=margin, cost=cost, top_n=10)
+    roi_table = build_roi_table(rules_for_bi, df, PRODUCT_COL,
+                                eligible=eligible, margin=margin, cost=cost, top_n=10)
     if roi_table.empty:
         st.info("No ROI rows (no rules).")
     else:
         st.dataframe(roi_table.round({
             "support":3, "confidence":3, "lift":2, "base_attach_%":2, "incremental_attach_%":2,
             "avg_consequent_price":2, "expected_incremental_revenue":2, "ROI":2
-        }))
-        if "expected_incremental_revenue" in roi_table:
-            fig_roi = px.bar(roi_table.sort_values("expected_incremental_revenue", ascending=False),
-                             x="expected_incremental_revenue", y="consequents",
-                             orientation="h", title="Expected Incremental Revenue by Rule")
-            st.plotly_chart(fig_roi, use_container_width=True)
+        }), use_container_width=True)
 
-    st.markdown("---")
+        # ROI bar
+        fig_roi = px.bar(
+            roi_table.sort_values("expected_incremental_revenue", ascending=False),
+            x="expected_incremental_revenue", y="consequents",
+            orientation="h", title="Expected Incremental Revenue by Rule",
+            text=roi_table.sort_values("expected_incremental_revenue", ascending=False)["expected_incremental_revenue"].map(lambda v: f"${v:,.0f}")
+        )
+        fig_roi.update_traces(textposition="outside")
+        fig_roi.update_layout(
+            xaxis_title="Expected Incremental Revenue ($)",
+            yaxis_title="Consequent Item(s)",
+            height=max(420, 26*len(roi_table)+120),
+            margin=dict(l=10, r=20, t=40, b=10)
+        )
+        st.plotly_chart(fig_roi, use_container_width=True)
+
     st.markdown("Actionable Recommendations")
     st.write("""
 - Loyal Frequent Shoppers: early access, limited-time drops, tiered perks; avoid heavy discounts.
@@ -518,6 +545,7 @@ with tab3:
 - Steady Long-Term Buyers: milestone coupons, buy-again widgets, free-shipping nudges.
 - Variety Seekers (Lapsed): win-back with new arrivals and sampler bundles; time-boxed incentives.
 - One-Off Low-Spend Buyers: lightweight re-engagement; limit spend if no response after two touches.
-- Cross-sell placement: PDP widgets and cart add-ons using lift ≥ 1.5 rules; lift 1.2–1.5 for email only.
+- Cross-sell placement: PDP widgets and cart add-ons using rules with lift ≥ 1.5; lift 1.2–1.5 for email only.
 """)
+
 
