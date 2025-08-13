@@ -663,27 +663,40 @@ with tab1:
     # --- Customer Lookup Section ---
 st.subheader("Customer Lookup")
 
-# Create sorted unique list of CustomerIDs from your clustered RFM dataset
-customer_list = sorted(rfm_k["CustomerID"].dropna().unique().tolist())
+# --- Customer Lookup (dropdown, robust to int/str CustomerID) ----------------
+def render_customer_lookup(rfm_k: pd.DataFrame):
+    st.markdown("### Customer Lookup (dropdown)")
 
-# Show dropdown instead of text input
-selected_customer = st.selectbox(
-    "Select a CustomerID", 
-    options=customer_list, 
-    index=None, 
-    placeholder="Choose a customer..."
-)
+    # 1) Pull the exact CustomerID values from the clustered table (post-filtering)
+    raw_ids = rfm_k["CustomerID"].dropna().unique().tolist()
+    if len(raw_ids) == 0:
+        st.info("No customers available after filtering/outlier removal.")
+        return
 
-# When a customer is selected, display their cluster and features
-if selected_customer is not None:
-    row = rfm_k.loc[rfm_k["CustomerID"] == selected_customer]
+    # 2) Build label->value mapping so we can display as strings but keep originals
+    labels = [str(v) for v in raw_ids]                  # safe for display
+    label_to_value = dict(zip(labels, raw_ids))         # map back to original dtype
+
+    # 3) Render a selectbox (dropdown)
+    selected_label = st.selectbox(
+        "Choose a CustomerID from the dataset",
+        options=sorted(labels),                         # sorted as strings for stable order
+        key="cust_lookup_selectbox"                     # unique key avoids widget collisions
+    )
+
+    # 4) Retrieve the original value and look up the row
+    selected_value = label_to_value[selected_label]
+    row = rfm_k.loc[rfm_k["CustomerID"] == selected_value]
 
     if row.empty:
+        # Should never happen because options came from rfm_k
         st.warning("CustomerID not found in the filtered set.")
-    else:
-        cluster_number = int(row["Cluster"].iloc[0])
-        st.success(f"Customer {selected_customer} is in Cluster {cluster_number}.")
-        st.write(row[CLUSTER_FEATURES])
+        return
+
+    cl = int(row["Cluster"].iloc[0])
+    st.success(f"Customer {selected_value} is in Cluster {cl}.")
+    st.write(row[CLUSTER_FEATURES])
+
 
 # ================================ TAB 2 ======================================
 with tab2:
