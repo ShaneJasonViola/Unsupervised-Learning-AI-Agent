@@ -660,45 +660,30 @@ with tab1:
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
     st.dataframe(cluster_profiles, use_container_width=True)
 
-    # --- Customer Lookup (dropdown instead of free-text) -------------------------
-# Build a sorted, de-duplicated list of CustomerIDs.
-# Use str() for sorting so it works for both numeric and string IDs.
-customer_options = sorted(
-    rfm_k["CustomerID"].dropna().unique().tolist(),
-    key=lambda x: str(x)
+    # --- Customer Lookup Section ---
+st.subheader("Customer Lookup")
+
+# Create sorted unique list of CustomerIDs from your clustered RFM dataset
+customer_list = sorted(rfm_k["CustomerID"].dropna().unique().tolist())
+
+# Show dropdown instead of text input
+selected_customer = st.selectbox(
+    "Select a CustomerID", 
+    options=customer_list, 
+    index=None, 
+    placeholder="Choose a customer..."
 )
 
-# Some datasets may filter out all customers after IQR cleaning.
-if len(customer_options) == 0:
-    st.info("No customers available after filtering/outlier removal.")
-else:
-    # Streamlit 1.30+ supports index=None with a placeholder; older versions default to first item.
-    customer_id = st.selectbox(
-        "Select a CustomerID",
-        options=customer_options,
-        index=None,                       # shows placeholder until a selection is made
-        placeholder="Choose a customer…"
-    )
+# When a customer is selected, display their cluster and features
+if selected_customer is not None:
+    row = rfm_k.loc[rfm_k["CustomerID"] == selected_customer]
 
-    # Only look up once the user has made a selection
-    if customer_id is not None:
-        # Fetch the matching row from the clustered RFM table
-        row = rfm_k.loc[rfm_k["CustomerID"] == customer_id]
-
-        if row.empty:
-            # This should be rare because options come from rfm_k itself,
-            # but we keep the guard for robustness.
-            st.warning("CustomerID not found in the filtered set.")
-        else:
-            cl = int(row["Cluster"].iloc[0])
-            st.success(f"Customer {customer_id} is in Cluster {cl}.")
-
-            # Show the customer’s key RFM/behavior features for context
-            st.write(row[CLUSTER_FEATURES])
-
-            present as a neat vertical table
-            st.dataframe(row[CLUSTER_FEATURES].T.rename(columns={row.index[0]: "Value"}))
-
+    if row.empty:
+        st.warning("CustomerID not found in the filtered set.")
+    else:
+        cluster_number = int(row["Cluster"].iloc[0])
+        st.success(f"Customer {selected_customer} is in Cluster {cluster_number}.")
+        st.write(row[CLUSTER_FEATURES])
 
 # ================================ TAB 2 ======================================
 with tab2:
