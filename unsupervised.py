@@ -660,42 +660,42 @@ with tab1:
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
     st.dataframe(cluster_profiles, use_container_width=True)
 
-    # --- Customer Lookup Section ---
-st.subheader("Customer Lookup")
+   # --- Customer Lookup (Dropdown) ----------------------------------------------
+st.markdown("Customer Lookup")
 
-# --- Customer Lookup (dropdown, robust to int/str CustomerID) ----------------
-def render_customer_lookup(rfm_k: pd.DataFrame):
-    st.markdown("### Customer Lookup (dropdown)")
+# Build a clean set of CustomerIDs from the clustered dataset (post-cleaning/outlier removal)
+_raw_ids = rfm_k["CustomerID"].dropna().unique().tolist()
 
-    # 1) Pull the exact CustomerID values from the clustered table (post-filtering)
-    raw_ids = rfm_k["CustomerID"].dropna().unique().tolist()
-    if len(raw_ids) == 0:
-        st.info("No customers available after filtering/outlier removal.")
-        return
+if len(_raw_ids) == 0:
+    st.info("No customers available after filtering/outlier removal.")
+else:
+    # We display IDs as strings (robust if your IDs are mixed types), but keep originals for lookup.
+    _labels = [str(v) for v in _raw_ids]
+    _label_to_value = dict(zip(_labels, _raw_ids))
 
-    # 2) Build label->value mapping so we can display as strings but keep originals
-    labels = [str(v) for v in raw_ids]                  # safe for display
-    label_to_value = dict(zip(labels, raw_ids))         # map back to original dtype
+    # Add a placeholder entry to avoid auto-selecting the first ID on load (works on all Streamlit versions)
+    _options = ["— Select a customer —"] + sorted(_labels)
 
-    # 3) Render a selectbox (dropdown)
     selected_label = st.selectbox(
-        "Choose a CustomerID from the dataset",
-        options=sorted(labels),                         # sorted as strings for stable order
-        key="cust_lookup_selectbox"                     # unique key avoids widget collisions
+        "Select a CustomerID",
+        options=_options,
+        key="cust_lookup_selectbox"
     )
 
-    # 4) Retrieve the original value and look up the row
-    selected_value = label_to_value[selected_label]
-    row = rfm_k.loc[rfm_k["CustomerID"] == selected_value]
+    # Only proceed after a real selection
+    if selected_label and selected_label != "— Select a customer —":
+        selected_value = _label_to_value[selected_label]
 
-    if row.empty:
-        # Should never happen because options came from rfm_k
-        st.warning("CustomerID not found in the filtered set.")
-        return
+        # Look up in rfm_k (the clustered/filtered table)
+        row = rfm_k.loc[rfm_k["CustomerID"] == selected_value]
+        if row.empty:
+            # Very unlikely since options came from rfm_k itself, but we keep the guard.
+            st.warning("CustomerID not found in the filtered set.")
+        else:
+            cl = int(row["Cluster"].iloc[0])
+            st.success(f"Customer {selected_value} is in Cluster {cl}.")
+            st.write(row[CLUSTER_FEATURES])
 
-    cl = int(row["Cluster"].iloc[0])
-    st.success(f"Customer {selected_value} is in Cluster {cl}.")
-    st.write(row[CLUSTER_FEATURES])
 
 
 # ================================ TAB 2 ======================================
