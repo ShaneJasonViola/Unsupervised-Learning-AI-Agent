@@ -660,42 +660,7 @@ with tab1:
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
     st.dataframe(cluster_profiles, use_container_width=True)
 
-   # --- Customer Lookup (Dropdown) ----------------------------------------------
-st.markdown("Customer Lookup")
-
-# Build a clean set of CustomerIDs from the clustered dataset (post-cleaning/outlier removal)
-_raw_ids = rfm_k["CustomerID"].dropna().unique().tolist()
-
-if len(_raw_ids) == 0:
-    st.info("No customers available after filtering/outlier removal.")
-else:
-    # We display IDs as strings (robust if your IDs are mixed types), but keep originals for lookup.
-    _labels = [str(v) for v in _raw_ids]
-    _label_to_value = dict(zip(_labels, _raw_ids))
-
-    # Add a placeholder entry to avoid auto-selecting the first ID on load (works on all Streamlit versions)
-    _options = ["— Select a customer —"] + sorted(_labels)
-
-    selected_label = st.selectbox(
-        "Select a CustomerID",
-        options=_options,
-        key="cust_lookup_selectbox"
-    )
-
-    # Only proceed after a real selection
-    if selected_label and selected_label != "— Select a customer —":
-        selected_value = _label_to_value[selected_label]
-
-        # Look up in rfm_k (the clustered/filtered table)
-        row = rfm_k.loc[rfm_k["CustomerID"] == selected_value]
-        if row.empty:
-            # Very unlikely since options came from rfm_k itself, but we keep the guard.
-            st.warning("CustomerID not found in the filtered set.")
-        else:
-            cl = int(row["Cluster"].iloc[0])
-            st.success(f"Customer {selected_value} is in Cluster {cl}.")
-            st.write(row[CLUSTER_FEATURES])
-
+   
 
 
 # ================================ TAB 2 ======================================
