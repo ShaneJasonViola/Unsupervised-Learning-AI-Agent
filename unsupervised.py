@@ -660,9 +660,9 @@ with tab1:
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
     st.dataframe(cluster_profiles, use_container_width=True)
 
-    # Individual customer lookup (handy for demos and sanity checks)
-    st.markdown("Customer Lookup")
-    lookup_id = st.text_input("Enter CustomerID")
+    # Get unique sorted list of customer IDs from the dataset
+    customer_list = sorted(df['CustomerID'].dropna().unique())
+    customer_id = st.selectbox("Select a Customer ID", customer_list)
     if lookup_id:
         try:
             cid = int(lookup_id)
