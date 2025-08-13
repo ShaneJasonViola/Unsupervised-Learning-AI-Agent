@@ -159,7 +159,7 @@ def build_rfm_extras(df: pd.DataFrame) -> pd.DataFrame:
     return rfm
 
 
-# Feature set used for clustering 
+# Feature set used for clustering (feel free to prune/extend thoughtfully)
 CLUSTER_FEATURES = [
     "Recency","Frequency","Monetary","AvgOrderValue","ProductDiversity",
     "TotalQuantity","AvgQuantityPerTransaction","CategoryDiversity",
@@ -660,7 +660,61 @@ with tab1:
     cluster_profiles = rfm_k.groupby("Cluster")[CLUSTER_FEATURES].mean().round(2)
     st.dataframe(cluster_profiles, use_container_width=True)
 
-   
+    # ===================== ADDED: Data Preview (scrollable & filterable) =====================
+    st.markdown("Data Preview")
+    _preview_ids_raw = df["CustomerID"].dropna().unique().tolist()
+    _preview_labels = [str(v) for v in _preview_ids_raw]
+    _preview_map = dict(zip(_preview_labels, _preview_ids_raw))
+
+    preview_choice = st.selectbox(
+        "Filter preview by CustomerID (optional)",
+        options=["All customers"] + sorted(_preview_labels),
+        key="preview_customer_filter"
+    )
+
+    if preview_choice == "All customers":
+        preview_df = df.copy()
+    else:
+        preview_df = df.loc[df["CustomerID"] == _preview_map[preview_choice]].copy()
+
+    # Height ~420px shows roughly 15 rows initially; full table is scrollable
+    st.dataframe(preview_df, height=420, use_container_width=True)
+    # =================== END ADDED: Data Preview (scrollable & filterable) ===================
+
+    # ===================== REPLACED: Customer Lookup (Dropdown) =====================
+    st.markdown("Customer Lookup")
+
+    # Use clustered/filtered table (rfm_k) to populate valid CustomerIDs
+    _raw_ids = rfm_k["CustomerID"].dropna().unique().tolist()
+
+    if len(_raw_ids) == 0:
+        st.info("No customers available after filtering/outlier removal.")
+    else:
+        # Display as strings for robustness; keep original values for lookup
+        _labels = [str(v) for v in _raw_ids]
+        _label_to_value = dict(zip(_labels, _raw_ids))
+
+        # Add a sentinel so the widget doesn't auto-select the first real ID
+        _options = ["— Select a customer —"] + sorted(_labels)
+
+        selected_label = st.selectbox(
+            "Select a CustomerID",
+            options=_options,
+            key="cust_lookup_selectbox"
+        )
+
+        if selected_label and selected_label != "— Select a customer —":
+            selected_value = _label_to_value[selected_label]
+
+            # Look up in rfm_k, which contains the cluster label
+            row = rfm_k.loc[rfm_k["CustomerID"] == selected_value]
+            if row.empty:
+                st.warning("CustomerID not found in the filtered set.")
+            else:
+                cl = int(row["Cluster"].iloc[0])
+                st.success(f"Customer {selected_value} is in Cluster {cl}.")
+                st.write(row[CLUSTER_FEATURES])
+    # =================== END REPLACED: Customer Lookup (Dropdown) ===================
 
 
 # ================================ TAB 2 ======================================
@@ -884,6 +938,10 @@ with tab3:
 - **One-Off Low-Spend Buyers**: lightweight re-engagement; limit spend if no response after two touches.
 - **Channel tips**: use rules with lift ≥ 1.5 for onsite/cart add-ons; lift 1.2–1.5 for email testing.
 """)
+
+
+
+
 
 
 
